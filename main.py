@@ -65,13 +65,13 @@ def convert_sections_into_documents(cv_sections):
         documents.append(doc)
     return documents
 
-def embed_and_store_documents(documents):
-    """Embed the documents and store them in a vector database."""
-    for doc in documents:
-        # Embed the document content
-        embedding = embed_text('\n'.join(doc['content']))
-        # Store the embedding along with metadata
-        store_embedding(embedding, doc['metadata'])
+# def embed_and_store_documents(documents):
+#     """Embed the documents and store them in a vector database."""
+#     for doc in documents:
+#         # Embed the document content
+#         embedding = embed_text('\n'.join(doc['content']))
+#         # Store the embedding along with metadata
+#         store_embedding(embedding, doc['metadata'])
 
 
 
