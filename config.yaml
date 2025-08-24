@@ -1,0 +1,6 @@
+params:
+  embedding_model : "sentence-transformers/all-MiniLM-L6-v2" 
+  hugging_face_token : "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"
+  
+input:
+  cv_path: "C:/Users/Samarth/OneDrive/Documents/CV/Data Scientist/Samarth_Dhawan_CV.pdf"
