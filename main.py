@@ -1,101 +1,267 @@
-import pandas as pd
-import numpy as np
-import os
-import pypdf
-import docx2txt
+"""
+Resume RAG Pipeline
+Parses Word resumes, extracts sections, and answers questions using retrieval.
+
+Installation:
+pip install python-docx scikit-learn huggingface-hub pyyaml
+
+Config file (config.yaml):
+params:
+  huggingface_token: hf_YOUR_TOKEN_HERE
+  model_name: meta-llama/Llama-3.2-3B-Instruct
+
+input:
+  cv: path/to/resume.docx
+"""
+
+import re
 import yaml
-from langchain_community.document_loaders import PyPDFLoader
-import requests
+from typing import List, Dict, Optional
+from dataclasses import dataclass
+import numpy as np
+from pathlib import Path
+
+try:
+    from docx import Document
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+    from huggingface_hub import InferenceClient
+except ImportError as e:
+    print(f"Missing dependency: {e}")
+    print("Install with: pip install python-docx scikit-learn huggingface-hub pyyaml")
+    raise
 
 
+@dataclass
+class ResumeSection:
+    """Represents a section of the resume"""
+    title: str
+    content: str
+    start_idx: int
+    end_idx: int
 
 
-
-def yaml_parser(file_path):
-    with open(file_path, 'r') as file:
-        return yaml.safe_load(file)
-
-def read_pdf_or_docx_file(file_path):
-    if file_path.endswith('.pdf'):
-        loader = pypdf.PdfReader(file_path)
-        return loader.pages, "pdf"
-    elif file_path.endswith('.docx'):
-        return docx2txt.process(file_path), "docx"
-    else:
-        raise ValueError("Unsupported file format")
+class ResumeParser:
+    """Parses resume documents and extracts structured sections"""
     
-def divide_cv_sections(cv_text,file_format):
-    """divide the text into sections beginning with uppercase letters"""
-    sections = []
-    current_section = []
-    if file_format=='docx':
-        for line in cv_text.split('\n'):
-            if line and line[0].isupper():
+    SECTION_PATTERNS = [
+        r'^(summary|professional summary|profile|objective)$',
+        r'^(experience|work experience|employment|work history)$',
+        r'^(education|academic background)$',
+        r'^(skills|technical skills|core competencies|additional|technical)$',
+        r'^(projects|key projects)$',
+        r'^(certifications|certificates|licenses|certifications?\s*&\s*training)$',
+        r'^(awards|achievements|honors)$',
+        r'^(publications|research)$',
+        r'^(languages|language proficiency)$',
+        r'^(interests|hobbies)$',
+        r'^(references|referees)$',
+        r'^(soft skills)$',
+    ]
+    
+    def __init__(self):
+        self.section_pattern = re.compile('|'.join(self.SECTION_PATTERNS), re.IGNORECASE)
+    
+    def parse_docx(self, file_path: str) -> str:
+        """Extract text from Word document"""
+        doc = Document(file_path)
+        text = ""
+        for para in doc.paragraphs:
+            text += para.text + "\n"
+        return text
+    
+    def parse_file(self, file_path: str) -> str:
+        """Parse resume file (Word documents only)"""
+        path = Path(file_path)
+        ext = path.suffix.lower()
+        
+        if ext in ['.docx', '.doc']:
+            return self.parse_docx(file_path)
+        else:
+            raise ValueError(f"Unsupported file format: {ext}. Only .docx/.doc files are supported.")
+    
+    def extract_sections(self, text: str) -> List[ResumeSection]:
+        """Extract sections from resume text"""
+        lines = text.split('\n')
+        sections = []
+        current_section = None
+        current_content = []
+        start_idx = 0
+        
+        for i, line in enumerate(lines):
+            line_stripped = line.strip()
+            
+            if self.section_pattern.match(line_stripped):
                 if current_section:
-                    sections.append('\n'.join(current_section))
-                current_section = [line]
-            else:
-                current_section.append(line)
+                    sections.append(ResumeSection(
+                        title=current_section,
+                        content='\n'.join(current_content).strip(),
+                        start_idx=start_idx,
+                        end_idx=i
+                    ))
+                
+                current_section = line_stripped
+                current_content = []
+                start_idx = i
+            elif current_section and line_stripped:
+                current_content.append(line_stripped)
+        
         if current_section:
-            sections.append('\n'.join(current_section))
-    elif file_format=='pdf':
-        for page in cv_text:
-            for line in page.extract_text().split('\n'):
-                if line.isupper():
-                    if current_section:
-                        sections.append('\n'.join(current_section))
-                    current_section = [line]
-                else:
-                    current_section.append(line)
-        if current_section:
-            sections.append('\n'.join(current_section))
-    return sections
-
-def convert_sections_into_documents(cv_sections):
-    """Divide the CV sections into separate langchain documents along with metadata as the section header."""
-    documents = []
-    for i, section in enumerate(cv_sections):
-        doc = {
-            "id": i,
-            "content": section.split('\n')[1:],  # Exclude the section title from content
-            "metadata": {
-                "section_title": section.split('\n')[0]
-            }
-        }
-        documents.append(doc)
-    return documents
-
-# def embed_and_store_documents(documents):
-#     """Embed the documents and store them in a vector database."""
-#     for doc in documents:
-#         # Embed the document content
-#         embedding = embed_text('\n'.join(doc['content']))
-#         # Store the embedding along with metadata
-#         store_embedding(embedding, doc['metadata'])
+            sections.append(ResumeSection(
+                title=current_section,
+                content='\n'.join(current_content).strip(),
+                start_idx=start_idx,
+                end_idx=len(lines)
+            ))
+        
+        return sections
 
 
+class ResumeRAG:
+    """RAG pipeline for resume question answering"""
+    
+    def __init__(self, config_path: str = "config.yaml"):
+        """Initialize RAG pipeline"""
+        self.parser = ResumeParser()
+        self.vectorizer = TfidfVectorizer(
+            max_features=1000,
+            ngram_range=(1, 2),
+            stop_words='english'
+        )
+        
+        self.config = self._load_config(config_path)
+        
+        self.client = InferenceClient(
+            token=self.config['params']['huggingface_token']
+        )
+        self.model_name = self.config['params']['model_name']
+        self.resume_path = self.config['input']['cv']
+        
+        self.sections: List[ResumeSection] = []
+        self.section_vectors: Optional[np.ndarray] = None
+        self.full_text: str = ""
+    
+    def _load_config(self, config_path: str) -> Dict:
+        """Load configuration from YAML file"""
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        return config
+    
+    def load_resume(self, file_path: str):
+        """Load and process resume"""
+        print(f"Loading resume from {file_path}...")
+        
+        self.full_text = self.parser.parse_file(file_path)
+        self.sections = self.parser.extract_sections(self.full_text)
+        print(f"Extracted {len(self.sections)} sections")
+        
+        if not self.sections:
+            self.sections = [ResumeSection(
+                title="Full Resume",
+                content=self.full_text,
+                start_idx=0,
+                end_idx=len(self.full_text)
+            )]
+        
+        texts = [f"{s.title} {s.content}" for s in self.sections]
+        self.section_vectors = self.vectorizer.fit_transform(texts)
+        
+        print("Resume loaded and indexed successfully!")
+    
+    def retrieve_relevant_sections(self, query: str, top_k: int = 3) -> List[ResumeSection]:
+        """Retrieve most relevant sections for a query"""
+        if self.section_vectors is None:
+            raise ValueError("No resume loaded. Call load_resume() first.")
+        
+        query_vector = self.vectorizer.transform([query])
+        similarities = cosine_similarity(query_vector, self.section_vectors)[0]
+        top_indices = np.argsort(similarities)[::-1][:top_k]
+        
+        return [self.sections[i] for i in top_indices]
+    
+    def answer_question(self, question: str, top_k: int = 3) -> str:
+        """Answer a question about the resume"""
+        relevant_sections = self.retrieve_relevant_sections(question, top_k)
+        
+        context = "\n\n".join([
+            f"Section: {section.title}\n{section.content}"
+            for section in relevant_sections
+        ])
+        
+        user_prompt = f"""Based on the following sections from a resume, answer the question.
 
-yaml_file = yaml_parser("config.yaml")
+Resume Sections:
+{context}
 
-cv_path = yaml_file['input']['cv_path']
-model_id = yaml_file['params']['embedding_model']
-hf_token = yaml_file['params']['hugging_face_token']
+Question: {question}
 
-data,file_format = read_pdf_or_docx_file(cv_path)
+Provide a clear, concise answer based only on the information in the resume sections above. If the information is not available, say so."""
+        
+        messages = [{"role": "user", "content": user_prompt}]
+        
+        response = self.client.chat_completion(
+            messages=messages,
+            model=self.model_name,
+            max_tokens=500,
+            temperature=0.7
+        )
+        
+        return response.choices[0].message.content
+    
+    def get_summary(self) -> str:
+        """Generate a summary of the entire resume"""
+        user_prompt = f"""Provide a concise professional summary of this resume, highlighting:
+- Key qualifications and experience
+- Main skills
+- Career focus
+- Notable achievements
 
-extracted_data = divide_cv_sections(data,file_format)
+Resume:
+{self.full_text[:4000]}
 
-cv_documents = convert_sections_into_documents(extracted_data)
+Provide a 3-4 sentence summary."""
+        
+        messages = [{"role": "user", "content": user_prompt}]
+        
+        response = self.client.chat_completion(
+            messages=messages,
+            model=self.model_name,
+            max_tokens=300,
+            temperature=0.7
+        )
+        
+        return response.choices[0].message.content
+    
+    def list_sections(self) -> List[str]:
+        """List all extracted sections"""
+        return [section.title for section in self.sections]
 
-api_url = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{model_id}"
-headers = {"Authorization": f"Bearer {hf_token}"}
 
-
-
-
-
-# loader = PyPDFLoader(cv_path)
-
-# print(data)
-# cv= loader.load()
-
+if __name__ == "__main__":
+    rag = ResumeRAG(config_path="config.yaml")
+    rag.load_resume(rag.resume_path)
+    
+    print("\nExtracted Sections:")
+    for section in rag.list_sections():
+        print(f"  - {section}")
+    
+    print("\n" + "="*50)
+    print("RESUME SUMMARY")
+    print("="*50)
+    print(rag.get_summary())
+    
+    questions = [
+        "What programming languages does the candidate know?",
+        "What is their most recent work experience?",
+        "What degree do they have?",
+        "What are their key achievements?"
+    ]
+    
+    print("\n" + "="*50)
+    print("QUESTION ANSWERING")
+    print("="*50)
+    
+    for question in questions:
+        print(f"\nQ: {question}")
+        answer = rag.answer_question(question)
+        print(f"A: {answer}")
