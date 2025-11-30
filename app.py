@@ -22,9 +22,9 @@ def chat_with_resume(message, history):
     Handle chat interactions
     Args:
         message: User's question
-        history: Chat history (list of [user_msg, bot_msg] pairs)
+        history: Chat history (not used for RAG retrieval)
     Returns:
-        Updated history
+        Bot response
     """
     try:
         # Get answer from RAG
@@ -85,7 +85,8 @@ custom_css = """
 """
 
 # Create Gradio interface
-with gr.Blocks(css=custom_css, theme=gr.themes.Soft()) as demo:
+with gr.Blocks() as demo:
+    gr.HTML(f"<style>{custom_css}</style>")
     
     # Header
     gr.HTML('<div id="main-header">💼 Chat with Samarth\'s Resume</div>')
@@ -96,9 +97,7 @@ with gr.Blocks(css=custom_css, theme=gr.themes.Soft()) as demo:
             # Main chat interface
             chatbot = gr.Chatbot(
                 height=500,
-                show_label=False,
-                avatar_images=(None, "🤖"),
-                bubble_full_width=False
+                show_label=False
             )
             
             msg = gr.Textbox(
@@ -116,8 +115,7 @@ with gr.Blocks(css=custom_css, theme=gr.themes.Soft()) as demo:
                 summary_btn = gr.Button("Generate Summary")
                 summary_output = gr.Textbox(
                     label="Professional Summary",
-                    lines=6,
-                    show_copy_button=True
+                    lines=6
                 )
         
         with gr.Column(scale=1):
@@ -161,15 +159,47 @@ with gr.Blocks(css=custom_css, theme=gr.themes.Soft()) as demo:
     
     # Event handlers
     def user_message(message, history):
-        """Add user message to chat"""
-        return "", history + [[message, None]]
+        if history is None:
+            history = []
+    
+        # Add user message in dict format
+        history.append({"role": "user", "content": message})
+        return "", history
+
     
     def bot_response(history):
-        """Generate bot response"""
-        message = history[-1][0]
-        response = chat_with_resume(message, history)
-        history[-1][1] = response
+        if not history:
+            return history
+    
+        # Find last user message (string)
+        user_msg = None
+        for msg in reversed(history):
+            if msg["role"] == "user":
+                user_msg = msg["content"]
+                break
+    
+        # --- CRITICAL FIX ---
+        # Gradio sometimes passes content as a list → convert it to a string
+        if isinstance(user_msg, list):
+            user_msg = " ".join(str(x) for x in user_msg)
+    
+        if not isinstance(user_msg, str):
+            user_msg = str(user_msg)
+    
+        # --- RAG CALL ---
+        try:
+            answer = rag.answer_question(user_msg, top_k=3)
+            history.append({"role": "assistant", "content": answer})
+        except Exception as e:
+            history.append({
+                "role": "assistant",
+                "content": f"Sorry, I encountered an error: {str(e)}"
+            })
+    
         return history
+
+
+
     
     # Submit message
     msg.submit(
@@ -200,9 +230,9 @@ with gr.Blocks(css=custom_css, theme=gr.themes.Soft()) as demo:
     # Sample question buttons
     for btn, question in sample_question_btns:
         btn.click(
-            lambda q=question: (q, []),
+            lambda q=question: q,
             None,
-            [msg, chatbot],
+            msg,
             queue=False
         ).then(
             user_message,
@@ -214,6 +244,7 @@ with gr.Blocks(css=custom_css, theme=gr.themes.Soft()) as demo:
             chatbot,
             chatbot
         )
+
     
     # Summary button
     summary_btn.click(
