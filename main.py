@@ -147,6 +147,25 @@ class ResumeRAG:
             config = yaml.safe_load(f)
         return config
     
+    def _load_config(self, config_path: str) -> Dict:
+        """Load configuration from YAML file with environment variable support"""
+        with open(config_path, 'r') as f:
+            config_str = f.read()
+        
+        # Replace environment variable placeholders
+        import os
+        import re
+        
+        # Find all ${VAR} patterns and replace with environment variables
+        def replace_env_var(match):
+            var_name = match.group(1)
+            return os.getenv(var_name, '')
+        
+        config_str = re.sub(r'\$\{([^}]+)\}', replace_env_var, config_str)
+        
+        config = yaml.safe_load(config_str)
+        return config
+    
     def load_resume(self, file_path: str):
         """Load and process resume"""
         print(f"Loading resume from {file_path}...")

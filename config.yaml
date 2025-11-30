@@ -1,7 +1,6 @@
 params:
-  embedding_model : "sentence-transformers/all-MiniLM-L6-v2"  # replace with embedding model
-  huggingface_token : "" # replace with your Hugging Face token
+  huggingface_token : ${HF_TOKEN}  # replace with your Hugging Face token
   model_name : "meta-llama/Llama-3.2-3B-Instruct" # replace with your model name
 
 input:
-  cv: "C:\\Users\\Samarth\\OneDrive\\Documents\\CV\\Samarth_Dhawan_CV.docx" #replace with path of CV
+  cv: "Samarth_Dhawan_CV.docx" #replace with path of CV
